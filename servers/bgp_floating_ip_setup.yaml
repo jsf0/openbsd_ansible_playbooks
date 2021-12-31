@@ -1,0 +1,123 @@
+#####################################################################################
+# This configures a Vultr instance to announce a reserved IP with OpenBGPD.         #
+# With multiple instances all configured like this, Vultr will route to the         #
+# floating IP with ECMP, so you have some redundancy/high availability. This        #
+# playbook does the bare minimum to get this working. No running services or        #
+# pf rules are configured. You could use this as a building block for a more        #
+# involved playbook that fully configures your server as you need it.               #
+#                                                                                   #
+# It's based on the link below:                                                     #
+# https://kernelpanic.life/software/high-availability-with-openbgpd-on-openbsd.html #
+#####################################################################################
+
+- name: Configure server with BGP announced floating IP
+  hosts: webservers
+
+# change floating_ip to your reserved IP
+# IP must not be attached to any instance and must be in same region as the instances
+# bgp_asn should be changed to your ASN found on BGP tab in Vultr
+# bgp_password should also be changed to password found there
+# This really should be encrypted and stored wit ansible-vault; it's provided here only as an example
+  vars:
+    floating_ip: 1.2.3.4/32
+    bgp_asn: 4000000000
+    bgp_password: hunter2
+
+  tasks:
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.inet.ip.forwarding
+        value: '1'
+
+    - name: Create lo1 config file
+      blockinfile:
+        path: /etc/hostname.lo1
+        create: yes
+        block: |
+          inet {{ floating_ip }}
+          up
+
+# There's probably a better way to do this than restarting networking, but this works
+    - name: Restart networking to bring up interface lo1
+      command: /bin/sh /etc/netstart
+
+    - name: Create bgpd.conf
+      blockinfile:
+        path: /etc/bgpd.conf
+        create: yes
+        block: |
+          ASN="{{ bgp_asn }}"
+          INSTANCE_IP="{{ ansible_default_ipv4.address }}"
+          FLOATING_IP="{{ floating_ip }}"
+          PASSWORD="{{ bgp_password }}"
+          AS $ASN
+          router-id $INSTANCE_IP
+          prefix-set mynetworks {
+                  $FLOATING_IP
+          }
+          include "/var/db/rpki-client/openbgpd"
+          prefix-set bogons {
+                  0.0.0.0/8 or-longer             # this network [RFC1122]
+                  10.0.0.0/8 or-longer            # private space [RFC1918]
+                  100.64.0.0/10 or-longer         # CGN Shared [RFC6598]
+                  127.0.0.0/8 or-longer           # localhost [RFC1122]
+                  169.254.0.0/16 or-longer        # link local [RFC3927]
+                  172.16.0.0/12 or-longer         # private space [RFC1918]
+                  192.0.2.0/24 or-longer          # TEST-NET-1 [RFC5737]
+                  192.88.99.0/24 or-longer        # 6to4 anycast relay [RFC7526]
+                  192.168.0.0/16 or-longer        # private space [RFC1918]
+                  198.18.0.0/15 or-longer         # benchmarking [RFC2544]
+                  198.51.100.0/24 or-longer       # TEST-NET-2 [RFC5737]
+                  203.0.113.0/24 or-longer        # TEST-NET-3 [RFC5737]
+                  224.0.0.0/4 or-longer           # multicast
+                  240.0.0.0/4 or-longer           # reserved for future use
+                  ::/8 or-longer                  # RFC 4291 IPv4-compatible, loopback, et al
+                  0100::/64 or-longer             # Discard-Only [RFC6666]
+                  2001:2::/48 or-longer           # BMWG [RFC5180]
+                  2001:10::/28 or-longer          # ORCHID [RFC4843]
+                  2001:db8::/32 or-longer         # docu range [RFC3849]
+                  2002::/16 or-longer             # 6to4 anycast relay [RFC7526]
+                  3ffe::/16 or-longer             # old 6bone
+                  fc00::/7 or-longer              # unique local unicast
+                  fe80::/10 or-longer             # link local unicast
+                  fec0::/10 or-longer             # old site local unicast
+                  ff00::/8 or-longer              # multicast
+          }
+          network prefix-set mynetworks set large-community $ASN:1:1
+          group "upstreams" {
+                  neighbor 169.254.169.254 {
+                          remote-as 64515
+                          descr "Vultr"
+                          announce IPv4 unicast
+                          tcp md5sig password $PASSWORD
+                          multihop 2
+                          local-address $INSTANCE_IP
+                  }
+          }
+          allow to ebgp prefix-set mynetworks large-community $ASN:1:1
+          deny quick from ebgp prefix-set mynetworks or-longer
+          allow from ibgp
+          allow to ibgp
+          match from ebgp set { large-community delete $ASN:*:* }
+          allow from any inet prefixlen 8 - 24
+          allow from any inet6 prefixlen 16 - 48
+          match from any community GRACEFUL_SHUTDOWN set { localpref 0 }
+          deny quick from any prefix-set bogons
+          deny quick from ebgp ovs invalid
+          deny quick from any AS 23456
+          deny quick from any AS 64496 - 131071
+          deny quick from any AS 4200000000 - 4294967295
+          deny from any max-as-len 100
+
+    - name: Enable RPKI validator
+      cron:
+        name: "RPKI validator"
+        user: root
+        minute: "~"
+        job: -ns rpki-client -v && bgpctl reload
+
+    - name: Enable and start OpenBGPD service
+      service:
+        name: bgpd
+        enabled: yes
+        state: started
