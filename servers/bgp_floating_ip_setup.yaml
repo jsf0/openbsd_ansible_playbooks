@@ -30,10 +30,9 @@
         value: '1'
 
     - name: Create lo1 config file
-      blockinfile:
-        path: /etc/hostname.lo1
-        create: yes
-        block: |
+      copy:
+        dest: /etc/hostname.lo1
+        content: |
           inet {{ floating_ip }}
           up
 
@@ -42,10 +41,9 @@
       command: /bin/sh /etc/netstart
 
     - name: Create bgpd.conf
-      blockinfile:
-        path: /etc/bgpd.conf
-        create: yes
-        block: |
+      copy:
+        dest: /etc/bgpd.conf
+        content: |
           ASN="{{ bgp_asn }}"
           INSTANCE_IP="{{ ansible_default_ipv4.address }}"
           FLOATING_IP="{{ floating_ip }}"
