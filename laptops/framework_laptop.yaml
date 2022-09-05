@@ -108,7 +108,7 @@
              [[Monokai Soda]]
                  background_color = "#1a1a1a"
                  cursor_color = "#f6f7ec"
-                 font = Fira Mono 16
+                 font = Fira Mono 14
                  foreground_color = "#c4c5b5"
                  show_titlebar = False
                  scrollbar_position = hidden
